@@ -1,8 +1,8 @@
-
 import React, { useState, useCallback, useEffect } from 'react';
 import { getInvestmentGuide } from './services/geminiService';
-import type { AnalysisParams } from './types';
+import type { AnalysisParams, AnalysisResponse } from './types';
 import { BuildingStorefrontIcon, MapPinIcon, CircleStackIcon, SparklesIcon, ChartPieIcon } from './components/icons';
+import { CustomerDemographicsChart, FootTrafficChart, CompetitorDensityChart } from './components/AnalysisCharts';
 import ReactMarkdown from 'react-markdown';
 import { NaverMap } from './components/NaverMap';
 
@@ -27,7 +27,7 @@ const Header: React.FC = () => (
 );
 
 const InputField: React.FC<{
-  id: keyof AnalysisParams;
+  id: keyof Omit<AnalysisParams, 'lat' | 'lng'>;
   label: string;
   placeholder: string;
   icon: React.ReactNode;
@@ -54,27 +54,40 @@ const InputField: React.FC<{
 );
 
 const App: React.FC = () => {
-  const [params, setParams] = useState<AnalysisParams>({
+  const [params, setParams] = useState<Omit<AnalysisParams, 'lat' | 'lng'>>({
     industry: '노브랜드 햄버거',
     region: '경기 분당',
     capital: '1억 5천만원',
   });
-  const [analysisResult, setAnalysisResult] = useState<string>('');
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [mapCenter, setMapCenter] = useState<{ lat: number, lng: number } | null>(null);
+  const [selectedLocation, setSelectedLocation] = useState<{ lat: number, lng: number } | null>(null);
   const [isMapApiLoaded, setIsMapApiLoaded] = useState(false);
 
   useEffect(() => {
     const loadNaverMapsApi = async () => {
       try {
         const response = await fetch('/api/config');
+        
+        if (!response.ok) {
+            let errorText = `Server error: ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorText = errorData.error || errorText;
+            } catch (e) {
+                // The response body was not JSON, use raw text.
+                errorText = await response.text();
+            }
+            throw new Error(`Failed to load map configuration. Details: ${errorText}`);
+        }
+
         const config = await response.json();
         const naverClientId = config.naverClientId;
 
         if (!naverClientId) {
-          console.error("Naver Client ID is not configured.");
-          return;
+          throw new Error("Naver Client ID was not found in the server's response.");
         }
 
         const script = document.createElement('script');
@@ -82,6 +95,9 @@ const App: React.FC = () => {
         script.async = true;
         script.onload = () => {
           setIsMapApiLoaded(true);
+        };
+        script.onerror = () => {
+            console.error("The Naver Maps script failed to load. Check the Client ID and network access.");
         };
         document.head.appendChild(script);
       } catch (error) {
@@ -92,10 +108,14 @@ const App: React.FC = () => {
     loadNaverMapsApi();
   }, []);
 
-
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
-    setParams(prev => ({ ...prev, [name]: value }));
+    if (name === 'region') {
+        setMapCenter(null);
+        setSelectedLocation(null);
+        setAnalysisResult(null);
+    }
+    setParams(prev => ({ ...prev, [name]: value as string }));
   };
 
   const geocodeAddress = (address: string): Promise<{ lat: number, lng: number }> => {
@@ -117,6 +137,10 @@ const App: React.FC = () => {
     });
   };
 
+  const handleMapClick = useCallback((coords: { lat: number, lng: number }) => {
+    setSelectedLocation(coords);
+  }, []);
+
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!params.industry || !params.region || !params.capital) {
@@ -125,19 +149,28 @@ const App: React.FC = () => {
     }
     setIsLoading(true);
     setError(null);
-    setAnalysisResult('');
-    setMapCenter(null);
+    
+    const shouldGeocode = !mapCenter;
 
     try {
-      const result = await getInvestmentGuide(params);
+      const apiParams: AnalysisParams = { 
+        ...params,
+        ...(selectedLocation && { lat: selectedLocation.lat, lng: selectedLocation.lng })
+      };
+      const result = await getInvestmentGuide(apiParams);
       setAnalysisResult(result);
 
-      if (isMapApiLoaded) {
+      if (shouldGeocode && isMapApiLoaded) {
         try {
           const coords = await geocodeAddress(params.region);
           setMapCenter(coords);
+          if (!selectedLocation) {
+            setSelectedLocation(coords);
+          }
         } catch (mapError) {
-          console.warn("Map geocoding failed:", mapError);
+            console.warn("Map geocoding failed:", mapError);
+            setMapCenter(null);
+            setSelectedLocation(null);
         }
       }
 
@@ -151,7 +184,7 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [params, isMapApiLoaded]);
+  }, [params, isMapApiLoaded, mapCenter, selectedLocation]);
 
   const renderContent = () => {
     if (isLoading) {
@@ -167,7 +200,7 @@ const App: React.FC = () => {
       );
     }
 
-    if (error) {
+    if (error && !analysisResult) { // Only show full-screen error if there's no result to display
         return (
              <div className="bg-red-50 p-6 rounded-2xl border border-red-200 h-full flex flex-col items-center justify-center text-center">
                 <p className="text-red-700 font-medium">{error}</p>
@@ -176,13 +209,30 @@ const App: React.FC = () => {
      }
 
     if (analysisResult) {
+      const { commercialDistrictAnalysis } = analysisResult;
       return (
         <div className="bg-white p-8 sm:p-10 rounded-2xl shadow-lg border border-slate-200">
           <h2 className="text-3xl font-bold text-slate-900 mb-6 border-b border-slate-200 pb-4">
             AI 상권 분석 리포트
           </h2>
           <article className="prose prose-lg max-w-none prose-h3:text-sky-700 prose-h3:font-semibold prose-strong:text-slate-800 prose-li:marker:text-sky-600">
-             <ReactMarkdown>{analysisResult}</ReactMarkdown>
+             <ReactMarkdown>{analysisResult.coreSummaryAndRecommendations}</ReactMarkdown>
+             <ReactMarkdown>{commercialDistrictAnalysis.text}</ReactMarkdown>
+          </article>
+            
+          <div className="my-10 space-y-12">
+            <CustomerDemographicsChart data={commercialDistrictAnalysis.customerDemographics} />
+            <FootTrafficChart data={commercialDistrictAnalysis.footTraffic} />
+            <CompetitorDensityChart data={commercialDistrictAnalysis.competitorDensity} />
+          </div>
+
+          <article className="prose prose-lg max-w-none prose-h3:text-sky-700 prose-h3:font-semibold prose-strong:text-slate-800 prose-li:marker:text-sky-600">
+            <ReactMarkdown>{analysisResult.costAnalysis}</ReactMarkdown>
+            <ReactMarkdown>{analysisResult.roadmap}</ReactMarkdown>
+            <ReactMarkdown>{analysisResult.successStrategies}</ReactMarkdown>
+            <ReactMarkdown>{analysisResult.riskAnalysis}</ReactMarkdown>
+            <ReactMarkdown>{analysisResult.taxAndInfo}</ReactMarkdown>
+            <ReactMarkdown>{analysisResult.finalSummary}</ReactMarkdown>
           </article>
         </div>
       );
@@ -196,86 +246,5 @@ const App: React.FC = () => {
       </div>
     )
   }
-
-  return (
-    <div className="min-h-screen bg-slate-100 font-sans text-slate-800">
-        <Header />
-        <main className="container mx-auto px-4 py-8">
-            <div className="grid grid-cols-1 lg:grid-cols-12 lg:gap-8">
-                <div className="lg:col-span-4">
-                    <div className="sticky top-24 bg-gradient-to-br from-sky-50 to-blue-100 rounded-2xl shadow-lg border border-sky-200 overflow-hidden">
-                        <div className="relative p-8 bg-gradient-to-r from-sky-600 to-blue-700">
-                            <ChartPieIcon className="w-24 h-24 text-sky-400/20 absolute -top-2 -right-4" />
-                            <h2 className="text-2xl font-bold text-yellow-300 mb-1">분석 조건 입력</h2>
-                            <p className="text-sky-200 text-sm">성공적인 창업을 위한 첫 걸음</p>
-                        </div>
-                        <div className="p-8">
-                            <form onSubmit={handleSubmit} className="space-y-6">
-                            <InputField
-                                id="industry"
-                                label="업종"
-                                placeholder="예: 노브랜드 햄버거, 소규모 와인바, 메가커피"
-                                icon={<BuildingStorefrontIcon className="h-5 w-5 text-gray-400" />}
-                                value={params.industry}
-                                onChange={handleInputChange}
-                            />
-                            <InputField
-                                id="region"
-                                label="창업 희망 지역"
-                                placeholder="예: 서울 강남구, 부산 해운대구"
-                                icon={<MapPinIcon className="h-5 w-5 text-gray-400" />}
-                                value={params.region}
-                                onChange={handleInputChange}
-                            />
-                            <InputField
-                                id="capital"
-                                label="초기 자본금"
-                                placeholder="예: 1억원, 5천만원"
-                                icon={<CircleStackIcon className="h-5 w-5 text-gray-400" />}
-                                value={params.capital}
-                                onChange={handleInputChange}
-                            />
-
-                            <div className="pt-2">
-                                <button
-                                type="submit"
-                                disabled={isLoading}
-                                className="w-full flex items-center justify-center gap-2 py-3 px-4 border border-transparent rounded-lg shadow-md text-sm font-medium text-white bg-sky-600 hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 disabled:bg-sky-300 disabled:cursor-not-allowed transform hover:scale-105 transition-all duration-300 ease-in-out"
-                                >
-                                <SparklesIcon className="w-5 h-5" />
-                                {isLoading ? '분석 중...' : 'AI 분석 시작하기'}
-                                </button>
-                            </div>
-                            {error && !isLoading && (
-                                <p className="mt-2 text-sm text-center text-red-600">{error}</p>
-                            )}
-                            </form>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="lg:col-span-8">
-                    <div className="mt-8 lg:mt-0">
-                        {renderContent()}
-                    </div>
-                    {mapCenter && (
-                        <div className="mt-8 bg-white p-6 rounded-2xl shadow-lg border border-slate-200">
-                            <h3 className="text-xl font-bold text-slate-800 mb-4 flex items-center gap-2">
-                                <MapPinIcon className="w-6 h-6 text-sky-600"/>
-                                창업 희망 지역 지도
-                            </h3>
-                            <NaverMap center={mapCenter} />
-                        </div>
-                    )}
-                </div>
-            </div>
-        </main>
-        
-        <footer className="text-center mt-8 py-6 text-sm text-slate-500 border-t border-slate-200">
-            <p>&copy; {new Date().getFullYear()} AI Commercial District Analysis for Successful Investment. All rights reserved.</p>
-        </footer>
-    </div>
-  );
-};
-
-export default App;
+  
+  const buttonText = selectedLocation && analysisResult ? '선택 위치
